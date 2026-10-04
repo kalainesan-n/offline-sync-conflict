@@ -1,590 +1,392 @@
 # Offline Sync Conflict Backend
 
-## Problem Statement
+**A conflict-aware synchronization backend for applications that need to keep data consistent across multiple devices, even when those devices make changes offline.**
 
-When users work with the same data across multiple devices offline, conflicts can occur when those devices come back online and attempt to synchronize their changes. Without proper conflict detection and resolution mechanisms, one device's changes can silently overwrite another's, leading to data loss and user frustration.
+[Live Demo](https://offline-sync-conflict-1.onrender.com) · [GitHub Repository](https://github.com/kalainesan-n/offline-sync-conflict)
 
-This backend implements a robust synchronization system that detects conflicts instead of silently overwriting data, preserves valid changes wherever possible, and provides clear feedback about synchronization outcomes.
+---
 
-## Features
+## Overview
 
-- **Conflict Detection**: Identifies when multiple devices have modified the same fields
-- **Change Preservation**: Preserves non-conflicting changes even when conflicts occur
-- **Version Tracking**: Maintains history of all accepted states for accurate change detection
-- **Optimistic Concurrency**: Uses version-based checking to detect stale updates
-- **Idempotency**: Safely handles duplicate synchronization requests
-- **Transaction Safety**: All operations occur in atomic transactions to prevent race conditions
-- **Clear API Responses**: Distinguishes between accepted, merged, and conflict outcomes
-- **Version History**: Ability to view and restore previous versions of notes
-- **Field-Level Granularity**: Detects and handles conflicts at the field level
+When multiple devices edit the same data while offline, their changes can diverge. When they reconnect, blindly accepting updates can overwrite newer information and cause data loss.
 
-## Architecture
+**Offline Sync Conflict** is a Node.js and Express backend designed to detect these conflicts, preserve compatible changes, and return clear synchronization results.
 
+The system uses PostgreSQL-backed version history, optimistic concurrency control, field-level conflict detection, transactional updates, and idempotency to make synchronization safer and more predictable.
+
+The project was developed for the **GDG on Campus SRM 2026–27 recruitment process — Backend: Offline Sync Conflict task**.
+
+## Live Demo
+
+| Resource | Link |
+|---|---|
+| Live API | https://offline-sync-conflict-1.onrender.com |
+| GitHub repository | https://github.com/kalainesan-n/offline-sync-conflict |
+| API documentation | https://offline-sync-conflict-1.onrender.com/api-docs |
+
+The root endpoint currently provides a basic availability response:
+
+```json
+{
+  "message": "Offline Sync Conflict API"
+}
 ```
-Client/Device
-      ↓
-Express API (Node.js)
-      ↓
-Sync / Conflict Logic
-      ↓
-PostgreSQL Database
-      ├── notes (current state)
-      ├── note_versions (historical snapshots)
-      └── idempotency_records (for duplicate request handling)
-```
 
-### Data Flow
+The root response confirms that the deployed application is reachable. The synchronization endpoints and database operations should be tested separately before claiming complete end-to-end verification.
 
-1. Client sends synchronization request with:
-   - `noteId`: UUID of the note
-   - `baseVersion`: Last known version from client's perspective
-   - `changes`: Fields the client wants to update
-   - `requestId`: UUID for idempotency
+## Key Features
 
-2. Server:
-   - Validates the request
-   - Checks idempotency (persistent database-backed)
-   - Locks the note row to prevent concurrent updates
-   - Retrieves current state and state at `baseVersion`
-   - Determines what changed on server since `baseVersion`
-   - Compares client changes with server changes:
-     - No overlap → Changes can be safely merged
-     - Same field changed → Conflict detected
-   - Applies non-conflicting changes, preserves server's conflicting changes
-   - Creates new version if state changed
-   - Records change in history
-   - Updates idempotency record with result
-   - Returns synchronization result
+- **Field-level conflict detection:** Identifies when the client and server have changed the same field since the client's last known version.
+- **Automatic merging:** Applies non-conflicting changes whenever possible.
+- **Version tracking:** Stores historical snapshots of accepted note states.
+- **Stale update protection:** Uses version information to detect outdated client updates.
+- **Idempotent requests:** Recognizes duplicate synchronization requests and replays their original results.
+- **Payload verification:** Rejects reuse of an idempotency key with a different request payload.
+- **Transactional consistency:** Groups synchronization operations into database transactions.
+- **Concurrent update protection:** Uses PostgreSQL row-level locking to coordinate updates to the same note.
+- **Version history and restoration:** Supports retrieving historical versions and restoring a previous state as a new version.
+- **API validation:** Provides structured error responses for invalid requests and unsupported synchronization states.
 
 ## Technology Stack
 
-- **Backend**: Node.js + Express.js
-- **Database**: PostgreSQL
-- **Database Driver**: pg (native PostgreSQL client)
-- **API Documentation**: Swagger/OpenAPI (via swagger-ui-express)
-- **Testing**: Jest + Supertest
-- **Environment Configuration**: dotenv
+| Component | Technology |
+|---|---|
+| Runtime | Node.js |
+| HTTP framework | Express.js |
+| Database | PostgreSQL |
+| Database driver | `pg` |
+| API documentation | Swagger/OpenAPI, `swagger-ui-express` |
+| Testing | Jest and Supertest |
+| Environment configuration | dotenv |
+| Deployment | Render and Docker |
 
-## Data Model
+## Architecture
 
-### Notes Table (Current State)
-```sql
-CREATE TABLE notes (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    title VARCHAR(255) NOT NULL,
-    body TEXT NOT NULL,
-    tags TEXT[] DEFAULT '{}',
-    version INTEGER NOT NULL DEFAULT 1,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+```text
+Client / Device A       Client / Device B
+        |                       |
+        +-----------+-----------+
+                    |
+              Express API
+                    |
+          Request Validation
+                    |
+          Idempotency Checking
+                    |
+       Version and Conflict Detection
+                    |
+       PostgreSQL Transaction
+          /         |          \
+       notes   note_versions   idempotency_records
+                    |
+          Synchronization Result
+                    |
+               API Response
 ```
 
-### Note Versions Table (Historical Snapshots)
-```sql
-CREATE TABLE note_versions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    note_id UUID NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-    title VARCHAR(255) NOT NULL,
-    body TEXT NOT NULL,
-    tags TEXT[] DEFAULT '{}',
-    version INTEGER NOT NULL,
-    changed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+### Database design
 
-    CONSTRAINT uk_note_id_version UNIQUE (note_id, version)
-);
-```
+The application separates current note state, historical versions, and idempotency records.
 
-### Idempotency Records Table
-```sql
-CREATE TABLE idempotency_records (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    request_id VARCHAR(255) NOT NULL UNIQUE,
-    payload_hash VARCHAR(64) NOT NULL, -- SHA-256 hash of the payload
-    result_status INTEGER, -- HTTP status code (NULL indicates request is being processed)
-    result_body JSONB, -- The response body stored as JSON
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL
-);
-```
+**1. `notes` — Current state**
 
-## Synchronization Model
+Stores the latest accepted state of each note, including its UUID, title, body, tags, version, and timestamps.
 
-The system implements optimistic concurrency with version tracking:
+**2. `note_versions` — Historical snapshots**
 
-1. **Client Perspective**: Client believes it last saw the note at `baseVersion`
-2. **Server Perspective**: Server knows the current version and maintains historical snapshots
-3. **Change Detection**: By comparing snapshots at `baseVersion` and current version, server determines exactly what changed since the client's last known state
-4. **Conflict Resolution**:
-   - If client and server changed different fields → Changes are merged
-   - If client and server changed the same field → Conflict detected (client must resolve)
-   - Non-conflicting changes are always preserved when possible
+Stores versioned snapshots of notes. These snapshots allow the backend to compare the client's base version with the current server state and support version history and restoration.
 
-## Version Tracking
+**3. `idempotency_records` — Duplicate request tracking**
 
-Every accepted state transition creates a new entry in the `note_versions` table:
-- Each version represents a immutable snapshot of the note at that point in time
-- Enables precise change detection between any two versions
-- Supports viewing history and restoring previous versions
-- Provides audit trail of all accepted changes
+Stores request identifiers, payload hashes, cached response status and body, and expiration timestamps. This allows the backend to recognize retries without blindly applying the same update again.
 
-## Conflict Detection
+## How Synchronization Works
 
-Field-level conflict detection compares:
-- What the client wants to change (from request)
-- What actually changed on the server since the client's `baseVersion` (from version history)
+Each synchronization request identifies the note, the version the client last observed, the requested changes, and a unique request ID.
 
-A conflict occurs when both the client and server have modified the same field since the client's last known state.
+The backend processes the request through the following stages:
 
-## Conflict Resolution Policy
+1. **Validate the request.** Check the identifiers, version, and changes.
+2. **Check idempotency.** If the request ID and payload match a previously processed request, return the stored result. If the same request ID is reused with a different payload, reject it.
+3. **Lock the note row.** Use PostgreSQL transaction locking to coordinate concurrent changes to the same note.
+4. **Load the base version.** Retrieve the historical snapshot corresponding to the client's `baseVersion`.
+5. **Compare changes.** Determine which fields have changed on the server since that base version.
+6. **Resolve conflicts.** Apply compatible client changes and preserve the server's value for conflicting fields.
+7. **Update the state and history.** Record a new version when the accepted note state changes.
+8. **Persist the result.** Store the idempotency result and return a response describing the outcome.
 
-When conflicts are detected:
-1. **Non-conflicting changes**: Automatically merged and applied
-2. **Conflicting changes**: Preserved in the server's version (not overwritten)
-3. **Response**: Returns status `conflict` with detailed information about each conflicting field
-4. **Client Responsibility**: Must resolve conflicts and retry with appropriate changes
+The objective is to prevent silent overwrites while preserving as much valid work as possible.
 
-This policy follows the requirements to:
-- Preserve valid changes wherever possible
-- Distinguish changes that can safely coexist from those requiring resolution
-- Prevent silent overwriting of newer accepted changes
-- Provide deterministic and explainable behavior
+## Conflict Resolution Strategy
 
-## Idempotency
+The backend uses a field-level, preserve-on-conflict strategy.
 
-To handle duplicate requests:
-- Each synchronization request includes a unique `requestId` (UUID)
-- Server maintains a record of recent request IDs with payload hashes
-- Duplicate requests with the same ID and payload return the original result
-- Duplicate requests with the same ID but different payload return a 422 error (idempotency-key misuse)
-- Records expire after a configurable time period (default 24 hours) to prevent unbounded growth
+### Scenario A: Non-conflicting changes
 
-## Concurrency Handling
+Two devices start with the same note:
 
-The system handles concurrent requests safely through:
-- **Row-Level Locking**: Uses `SELECT FOR UPDATE` to lock notes during processing
-- **Atomic Transactions**: All operations (validation, idempotency check, locking, change detection, update, history recording) occur in a single database transaction
-- **Proper Isolation**: Prevents race conditions like:
-  - Two requests both passing version check
-  - Old requests overwriting newer accepted changes
-  - Inconsistent state between current note and version history
-
-## API Documentation
-
-### Base URL
-```
-/api
-```
-
-### Endpoints
-
-#### POST /notes/sync
-Synchronize note changes from client device
-
-**Request:**
 ```json
 {
-  "noteId": "string (uuid)",
-  "baseVersion": "integer (>= 0)",
-  "changes": {
-    "title?: string",
-    "body?: string",
-    "tags?: string[]"
-  },
-  "requestId": "string (uuid)"
+  "title": "Hello",
+  "body": "World"
 }
 ```
 
-**Responses:**
+Device A changes the title to `Hi`, while Device B changes the body to `Earth`.
 
-**200 OK** - Successfully processed
+Because the devices changed different fields, their changes can be merged:
+
 ```json
 {
-  "status": "accepted|merged|conflict",
-  "note": {
-    "id": "string (uuid)",
-    "title": "string",
-    "body": "string",
-    "tags": "string[]",
-    "version": "integer",
-    "updatedAt": "ISO 8601 timestamp",
-    "createdAt": "ISO 8601 timestamp"
-  },
-  "message": "string",
-  "conflicts": [
-    // Only present when status is "conflict"
-    {
-      "field": "string (one of: title|body|tags)",
-      "clientValue": "*",
-      "serverValue": "*",
-      "baseValue": "*"
-    }
-  ]
+  "title": "Hi",
+  "body": "Earth"
 }
 ```
 
-**400 Bad Request** - Invalid request format
-```json
-{
-  "error": "string (description of validation error)",
-  "details": {
-    "field": "string",
-    "issue": "string"
-  }
-}
-```
+The system preserves both changes.
 
-**422 Unprocessable Entity** - Validation failed or idempotency-key misuse
-```json
-{
-  "error": "string",
-  "details": {
-    "baseVersion": "Client baseVersion is newer than current server version",
-    "idempotency": "Idempotency key reused with different payload"
-  }
-}
-```
+### Scenario B: Conflicting changes
 
-#### GET /notes/:id
-Retrieve current state of a note
+Two devices edit the same title from the same base version:
 
-**Response (200 OK):**
-```json
-{
-  "id": "string (uuid)",
-  "title": "string",
-  "body": "string",
-  "tags": "string[]",
-  "version": "integer",
-  "updatedAt": "ISO 8601 timestamp",
-  "createdAt": "ISO 8601 timestamp"
-}
-```
+- Device A changes the title to `Hi`.
+- Device B changes the title to `Hey`.
 
-#### GET /notes/:id/versions
-Retrieve version history for a note
+The backend detects that both changes target the same field. Under the documented policy, the already accepted server value is preserved, and the incoming conflicting value is reported to the client.
 
-**Response (200 OK):**
-```json
-{
-  "noteId": "string (uuid)",
-  "versions": [
-    {
-      "version": "integer",
-      "title": "string",
-      "body": "string",
-      "tags": "string[]",
-      "changedAt": "ISO 8601 timestamp"
-    }
-  ],
-  "count": "integer"
-}
-```
+The conflict response is intended to include the field name and the base, client, and server values so the client can make an informed decision.
 
-#### POST /notes/:id/restore
-Restore a previous version of a note (creates new version)
+### Scenario C: Stale update
 
-**Request:**
-```json
-{
-  "versionToRestore": "integer (>= 1)",
-  "requestId": "string (uuid)"
-}
-```
+A device reads version 1. Another device updates the note to version 2. The first device later submits an update based on version 1.
 
-**Response (200 OK):**
-```json
-{
-  "status": "accepted",
-  "note": {
-    "id": "string (uuid)",
-    "title": "string",
-    "body": "string",
-    "tags": "string[]",
-    "version": "integer",
-    "updatedAt": "ISO 8601 timestamp",
-    "createdAt": "ISO 8601 timestamp"
-  },
-  "message": "string",
-  "restoredVersion": "integer",
-  "newVersion": "integer"
-}
-```
+The backend detects that the request is based on an older state. Depending on the request and applicable validation rules, the server can reject an invalid or stale version rather than silently overwriting newer accepted data.
 
-## Example Scenarios
+## Version History and Restoration
 
-### Non-Conflicting Changes (Merge)
-**Scenario**:
-- Device A reads note at version 1 (title: "Hello", body: "World")
-- Device B reads note at version 1 (title: "Hello", body: "World")
-- Device A updates title to "Hi"
-- Device B updates body to "Earth"
+Every accepted state transition that changes the note creates a historical snapshot.
 
-**Result**:
-- Status: "merged"
-- Final note: title: "Hi", body: "Earth", version: 3
-- Both changes preserved
+Version history supports:
 
-### Conflicting Changes
-**Scenario**:
-- Device A reads note at version 1 (title: "Hello", body: "World")
-- Device B reads note at version 1 (title: "Hello", body: "World")
-- Device A updates title to "Hi"
-- Device B updates title to "Hey"
+- Inspecting previous note states.
+- Comparing a client's base version with the current server state.
+- Detecting changes made by other devices.
+- Restoring an earlier state without erasing the history of subsequent changes.
 
-**Result**:
-- Status: "conflict"
-- Final note: title: "Hey" (server's version preserved), body: "World", version: 3
-- Conflicts array shows:
-  - Field: "title"
-  - Client Value: "Hi"
-  - Server Value: "Hey"
-  - Base Value: "Hello"
-- Device A's change preserved where possible (body unchanged)
+Restoration is designed to create a new version containing the restored content rather than rewriting the existing historical record.
 
-### Stale Update Protection
-**Scenario**:
-- Device A reads note at version 1
-- Device B reads note at version 1 and updates it (becomes version 2)
-- Device A attempts to update based on version 1
-
-**Result**:
-- Status: 422 Unprocessable Entity
-- Error: "Client baseVersion is newer than current server version"
-- Note remains at version 2 with Device B's changes
-
-## Setup Instructions
-
-### Prerequisites
-- Node.js (v18+ recommended)
-- PostgreSQL (v12+ recommended)
-- npm or yarn
-
-### Installation
-
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Create a `.env` file based on `.env.example`:
-   ```bash
-   cp .env.example .env
-   ```
-
-4. Update `.env` with your PostgreSQL connection details:
-   ```
-   DATABASE_URL="postgresql://username:password@host:port/database"
-   PORT=3000
-   NODE_ENV=development
-   IDEMPOTENCY_TTL_HOURS=24
-   ```
-
-5. The server will automatically initialize the database schema on startup (creates tables if they don't exist)
-
-### Running the Server
-
-```bash
-# Development mode
-npm start
-
-# Or directly
-node src/server.js
-```
-
-The server will start on port 3000 (or as configured in PORT environment variable).
-
-### Accessing API Documentation
-
-Once the server is running, visit:
-```
-http://localhost:3000/api-docs
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Generate coverage report
-npm run test:coverage
-```
-
-## Testing Strategy
-
-The test suite covers:
-
-### Basic Behavior
-- Note creation and retrieval
-- Basic synchronization operations
-
-### Versioning
-- Correct initial version assignment
-- Proper version incrementing
-- Stale version detection
-
-### Conflict Detection
-- Same-field conflicts
-- Different-field merges (non-conflicting)
-- Mixed scenarios (some fields conflict, some don't)
-- Multiple device scenarios
+## Idempotency and Concurrency
 
 ### Idempotency
-- Duplicate request handling
-- Same request ID with identical payload
-- Same request ID with different payload (error)
-- Expired idempotency records
 
-### Ordering Scenarios
-- Out-of-order request handling
-- Stale requests after newer updates
+Each synchronization request includes a unique `requestId`.
 
-### Concurrency
-- Parallel synchronization requests
-- Race condition prevention
-- Simultaneous updates to same note
+- Same request ID and same payload: return the previously recorded result.
+- Same request ID and different payload: reject the request as idempotency-key misuse.
+- Expired records: eligible for cleanup according to the configured retention policy.
 
-### Failure Cases
-- Invalid UUID formats
-- Missing required fields
-- Invalid data types
-- Negative version numbers
-- Non-existent resources
-- Database error handling
+The documented default retention period is 24 hours.
 
-### Version History (Enhancement)
-- Retrieving version history
-- Restoring previous versions
-- History preservation during restore
+### Transaction safety
 
-## Important Design Decisions
+The synchronization process uses PostgreSQL transactions and row-level locking to coordinate updates to the same note.
 
-### 1. Database-Backed Idempotency
-Instead of in-memory idempotency storage, we use a database table with:
-- Persistent storage across server restarts
-- Automatic cleanup of expired records
-- Protection against duplicate requests in distributed environments
-- Payload hash verification to detect idempotency-key misuse
+This helps prevent race conditions where concurrent requests both attempt to update the same state, and it keeps the current note, version history, and idempotency result consistent.
 
-### 2. Separation of Current State and History
-- `notes` table: Current state for fast reads
-- `note_versions` table: Historical snapshots for change tracking
-- This separation provides:
-  - Fast access to current state
-  - Efficient change detection between versions
-  - Foundation for history viewing and restoration features
+## API Reference
 
-### 3. Atomic Transactions
-All synchronization operations occur within a single database transaction:
-- Prevents race conditions
-- Ensures consistency between current state and history
-- Guarantees that idempotency records are properly updated
-- Eliminates partial update scenarios
+The API uses `/api` as its base prefix. Confirm the deployed API documentation for the exact request and response schemas.
 
-### 4. Row-Level Locking
-Using `SELECT FOR UPDATE` on the note row:
-- Prevents concurrent updates to the same note
-- Ensures version checking and updating are atomic
-- Minimizes lock contention by locking only the specific note being updated
+### 1. Synchronize a note
 
-### 5. Preserve-On-Conflict Strategy
-When conflicts are detected:
-- Non-conflicting client changes are applied
-- Server's conflicting changes are preserved
-- Client receives detailed conflict information for resolution
-- No data is silently lost or overwritten
+`POST /api/notes/sync`
 
-## Assumptions
+Example request:
 
-1. **Single Source of Truth**: The database is the single source of truth for note state
-2. **UUIDv4 Format**: Note IDs and request IDs follow standard UUID format
-3. **Reasonable Payload Size**: Note titles, bodies, and tags are reasonably sized (not megabytes of data)
-4. **Moderate Concurrency**: While the system handles concurrency well, it's not designed for extremely high-throughput scenarios requiring sharding or clustering
-5. **Trust Boundary**: Clients are generally trusted to send well-formed requests (though all input is validated)
+```json
+{
+  "noteId": "00000000-0000-4000-8000-000000000001",
+  "baseVersion": 1,
+  "changes": {
+    "title": "Updated title"
+  },
+  "requestId": "00000000-0000-4000-8000-000000000002"
+}
+```
 
-## Known Limitations
+The response describes the synchronization outcome and the resulting note state. Depending on the implementation, the outcome can be `accepted`, `merged`, or `conflict`.
 
-1. **No Authentication/Authorization**: Current implementation assumes all clients are trusted. For production use, authentication and authorization layers would need to be added.
+### 2. Retrieve a note
 
-2. **Limited Conflict Resolution Strategies**: The current implementation uses a "server wins" policy for conflicting fields (preserves server's version). More sophisticated strategies (like merge functions or manual resolution UIs) would need to be implemented client-side.
+`GET /api/notes/:id`
 
-3. **Horizontal Scaling**: While the database can handle multiple connections, the current implementation assumes a single server instance. For horizontal scaling, additional considerations would be needed for:
-   - Shared idempotency record storage (already database-backed)
-   - Distributed locking mechanisms (row-level locking works with shared databases)
-   - Shared file uploads (if extended to support file attachments)
+Retrieves the current state of a note by its UUID.
 
-4. **No Soft Deletes**: Notes are permanently deleted from the system (though version history preserves snapshots until explicitly cleaned up).
+### 3. Retrieve version history
+
+`GET /api/notes/:id/versions`
+
+Returns the historical versions associated with a note.
+
+### 4. Restore a previous version
+
+`POST /api/notes/:id/restore`
+
+Example request:
+
+```json
+{
+  "versionToRestore": 1,
+  "requestId": "00000000-0000-4000-8000-000000000003"
+}
+```
+
+A successful restoration is intended to create a new version containing the selected historical state.
+
+### Error handling
+
+The documented API distinguishes malformed requests, validation failures, version errors, and idempotency-key misuse. Commonly documented status codes include:
+
+- `200 OK` — request processed successfully.
+- `400 Bad Request` — malformed or invalid request structure.
+- `422 Unprocessable Entity` — validation or version/idempotency rule violation.
+
+Refer to the actual route implementation and API documentation for exact status codes and response bodies.
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18 or later.
+- PostgreSQL 12 or later.
+- npm.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/kalainesan-n/offline-sync-conflict.git
+cd offline-sync-conflict
+```
+
+### 2. Install dependencies
+
+```bash
+npm install
+```
+
+### 3. Configure environment variables
+
+Copy `.env.example` to `.env` and configure the values for your local environment.
+
+```env
+DATABASE_URL=postgresql://username:password@host:port/database
+PORT=3000
+NODE_ENV=development
+IDEMPOTENCY_TTL_HOURS=24
+```
+
+Replace the database URL with your own PostgreSQL connection details. Never commit `.env` or publish database credentials.
+
+### 4. Start the server
+
+```bash
+npm start
+```
+
+The application uses the configured `PORT`, which defaults to 3000 according to the project documentation.
+
+The database schema is initialized by the application at startup. Ensure your database is available and that the configured database user has the required permissions.
+
+### 5. Open API documentation
+
+When running locally, open:
+
+http://localhost:3000/api-docs
+
+If the documentation route is enabled in the deployed application, it can also be accessed at:
+
+https://offline-sync-conflict-1.onrender.com/api-docs
+
+## Testing
+
+The project uses Jest and Supertest for automated testing.
+
+Run the test suite with:
+
+```bash
+npm test
+```
+
+If supported by the project's npm scripts, run tests in watch mode with:
+
+```bash
+npm run test:watch
+```
+
+The documented test coverage areas include:
+
+- Basic note creation, retrieval, and synchronization.
+- Version assignment and increments.
+- Stale update detection.
+- Same-field conflicts and different-field merges.
+- Duplicate requests and idempotency-key misuse.
+- Out-of-order updates.
+- Concurrent requests and race conditions.
+- Invalid identifiers and request payloads.
+- Database error handling.
+- Version history and restoration.
+
+**Testing note:** these are the intended coverage areas, not a claim that every test has passed in the current deployment environment. Run tests against a dedicated test database, not a database containing data you need to preserve.
 
 ## Deployment
 
-The application can be deployed to any Node.js hosting platform that supports PostgreSQL:
+The project is deployed on Render and uses a hosted PostgreSQL database.
 
-1. Ensure PostgreSQL is accessible from the deployment environment
-2. Set the `DATABASE_URL` environment variable
-3. Set `NODE_ENV=production` for production builds
-4. Ensure the PORT environment variable is set or defaults to 3000
-5. The server will automatically initialize the database schema on startup (creates tables if they don't exist)
+**Live API:** https://offline-sync-conflict-1.onrender.com
 
-### Deployment Options
+Deployment configuration requires the appropriate PostgreSQL connection string and environment variables to be configured in the hosting provider's secure environment settings.
 
-#### Direct Server Deployment
-```bash
-# Install dependencies
-npm install
+The repository includes Docker and hosting configuration files. Keep secrets outside the repository, and ensure production database initialization does not delete existing data.
 
-# Set environment variables (example)
-export DATABASE_URL="postgresql://user:password@host:port/database"
-export PORT=3000
-export NODE_ENV=production
+## Design Decisions
 
-# Start the server
-npm start
-```
+**Optimistic concurrency control:** Clients report the version they last observed, allowing the backend to detect changes made in the meantime.
 
-#### Docker Deployment
-1. Build the Docker image:
-   ```bash
-   docker build -t offline-sync-conflict .
-   ```
+**Field-level conflict detection:** Conflicts are evaluated per field, allowing independent changes to be merged.
 
-2. Run the container:
-   ```bash
-   docker run -p 3000:3000 \\
-     -e DATABASE_URL="postgresql://user:password@host:port/database" \\
-     -e NODE_ENV=production \\
-     -e PORT=3000 \\
-     offline-sync-conflict
-   ```
+**Database-backed idempotency:** Duplicate request handling survives server restarts and is shared through PostgreSQL rather than being limited to process memory.
 
-### Example Deployment Platforms
-- AWS Elastic Beanstalk
-- Google App Engine
-- Microsoft Azure App Service
-- Heroku
-- Docker/Kubernetes
-- Traditional VPS
+**Separate current state and history:** Current reads remain straightforward while historical snapshots support conflict detection, auditing, and restoration.
 
-### Environment Variables
-- `DATABASE_URL`: PostgreSQL connection string (required)
-- `PORT`: Server port (defaults to 3000)
-- `NODE_ENV`: Environment (development, production, test)
-- `IDEMPOTENCY_TTL_HOURS`: Hours to remember request IDs for idempotency (defaults to 24)
+**Transactional updates:** Current state, version history, and request results are coordinated to reduce inconsistent partial updates.
 
-### Database Initialization
-The server automatically initializes the database schema on startup by creating the required tables if they don't exist:
-- `notes`: Current state of notes
-- `note_versions`: Historical versions of notes
-- `idempotency_records`: Idempotency keys for duplicate request detection
+## Known Limitations
 
-## License
+- **No authentication or authorization:** The current implementation does not provide a complete identity and access-control layer. It should not be used for sensitive multi-user data without appropriate security controls.
+- **Server-preserving conflict policy:** Conflicting fields retain the accepted server value. A more sophisticated manual conflict-resolution interface would need to be implemented by a client.
+- **No soft-delete workflow:** Deleted notes are not managed through a dedicated soft-delete mechanism.
+- **Scaling considerations:** High-throughput deployments and multiple service instances require appropriate database connection management, operational monitoring, and further load testing.
 
-ISC License
+## Future Improvements
 
-## Acknowledgments
+Potential next steps include:
 
-This project was built as part of the GDG on Campus SRM 2026-27 recruitment process for the Backend — Offline Sync Conflict task.
+- Authentication and per-user note authorization.
+- A client-side conflict-resolution interface.
+- Load testing under concurrent synchronization workloads.
+- Monitoring, structured logging, and operational metrics.
+- More comprehensive integration testing against a dedicated test database.
+
+## Project Information
+
+**Project:** Offline Sync Conflict Backend  
+**Recruitment:** GDG on Campus SRM 2026–27  
+**Category:** Backend  
+**Repository:** [kalainesan-n/offline-sync-conflict](https://github.com/kalainesan-n/offline-sync-conflict)  
+**Live demo:** [offline-sync-conflict-1.onrender.com](https://offline-sync-conflict-1.onrender.com)
+
+The project explores how a backend can handle offline edits from multiple devices while reducing silent overwrites, preserving compatible changes, and making synchronization outcomes explicit.
+
+---
+
+*Built with Node.js, Express, and PostgreSQL.*

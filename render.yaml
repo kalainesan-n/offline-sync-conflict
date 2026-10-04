@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: offline-sync-conflict
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: offline-sync-conflict-db
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: IDEMPOTENCY_TTL_HOURS
+        value: 24
+
+databases:
+  - name: offline-sync-conflict-db
+    plan: free
+    region: oregon

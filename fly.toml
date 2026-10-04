@@ -1,0 +1,32 @@
+app = "offline-sync-conflict"
+
+kill_signal = "SIGINT"
+kill_timeout = 5
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  IDEMPOTENCY_TTL_HOURS = 24
+
+[[services]]
+  http_checks = []
+  internal_port = 3000
+  protocol = "tcp"
+  script_checks = []
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+  [[services.ports]]
+    force_https = true
+    port = 80
+    handlers = ["http"]
+    tls = true
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.tcp_checks]]
+    interval = 15000
+    restart_limit = 0
+    timeout = 2000

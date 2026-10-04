@@ -5,7 +5,7 @@ A backend for keeping notes consistent when multiple devices edit them offline. 
 **Live demo:** [offline-sync-conflict-1.onrender.com](https://offline-sync-conflict-1.onrender.com)  
 **Source code:** [GitHub repository](https://github.com/kalainesan-n/offline-sync-conflict)
 
-Built for the **GDG on Campus SRM 2026–27 recruitment — Backend task**.
+Built for the **GDG recruitment Backend task**.
 
 ## The problem
 
